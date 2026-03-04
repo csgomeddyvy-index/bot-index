@@ -1,6 +1,7 @@
 discord.py
-vnstock3
+vnstock
 pandas
 google-generativeai
 pytz
 flask
+ipython
