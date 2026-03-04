@@ -1,8 +1,8 @@
 discord.py
-vnstock
 pandas
 google-generativeai
 pytz
 flask
 ipython
 mplfinance
+requests
