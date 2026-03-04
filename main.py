@@ -1,12 +1,12 @@
 import discord
-from discord.ext import tasks
+from discord.ext import commands, tasks
 import pandas as pd
-from vnstock3 import Vnstock
+from vnstock import Vnstock # Đã sửa thành vnstock chuẩn
 import datetime
 import pytz
 import os
 import google.generativeai as genai
-from keep_alive import keep_alive # Nạp server giả vào
+from keep_alive import keep_alive 
 
 # --- 1. LẤY BIẾN MÔI TRƯỜNG TỪ RENDER ---
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -16,87 +16,132 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 # --- 2. CẤU HÌNH AI GEMINI ---
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
+# --- 3. CẤU HÌNH BOT CÓ TÍNH NĂNG TƯƠNG TÁC LỆNH ---
 intents = discord.Intents.default()
-client = discord.Client(intents=intents)
+intents.message_content = True # Bắt buộc phải có để bot đọc được lệnh !soi
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Danh sách cổ phiếu muốn AI soi
 danh_sach_ma = ['FPT', 'HPG', 'SSI', 'MWG', 'VND', 'VHM']
 
-# --- 3. VÒNG LẶP SOÁT LỖI (5 PHÚT/LẦN) ---
+# ==========================================
+# TÍNH NĂNG MỚI: TƯƠNG TÁC LỆNH !soi
+# ==========================================
+@bot.command(name='soi')
+async def soi_cophieu(ctx, ma_cp: str):
+    ma_cp = ma_cp.upper()
+    await ctx.send(f"⏳ Đang thu thập dữ liệu và phân tích chuyên sâu mã **{ma_cp}**... Chờ xíu nhé!")
+    
+    try:
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        now = datetime.datetime.now(vn_tz)
+        
+        # Lấy dữ liệu 30 ngày
+        stock = Vnstock().stock(symbol=ma_cp, source='TCBS')
+        df = stock.quote.history(start=(now - datetime.timedelta(days=30)).strftime('%Y-%m-%d'), 
+                                 end=now.strftime('%Y-%m-%d'))
+        
+        if df.empty:
+            await ctx.send(f"❌ Không tìm thấy dữ liệu cho mã {ma_cp}. Bạn gõ đúng mã chưa?")
+            return
+            
+        gia_hien_tai = df['close'].iloc[-1]
+        khoi_luong = df['volume'].iloc[-1]
+        gia_thap_nhat = df['low'].min()
+        gia_cao_nhat = df['high'].max()
+        
+        # Prompt ép AI nói dài và chi tiết
+        prompt = f"""
+        Bạn là một chuyên gia phân tích chứng khoán Việt Nam lão luyện.
+        Hãy phân tích THẬT CHI TIẾT và CHUYÊN SÂU mã cổ phiếu {ma_cp} dựa trên dữ liệu sau:
+        - Giá hiện tại: {gia_hien_tai} VND
+        - Khối lượng giao dịch: {khoi_luong:,.0f} cổ phiếu.
+        - Biên độ giá 30 ngày qua: {gia_thap_nhat} - {gia_cao_nhat} VND.
+        
+        Vui lòng chia bài phân tích thành các phần rõ ràng:
+        1. Vị thế giá: Đánh giá giá hiện tại so với lịch sử 30 ngày (Đang tích lũy, vượt đỉnh hay dò đáy?).
+        2. Dòng tiền: Khối lượng hiện tại nói lên điều gì về tâm lý nhà đầu tư?
+        3. Triển vọng ngành: Ngành của {ma_cp} có đang được hưởng lợi từ vĩ mô không?
+        4. Hành động cụ thể: Lời khuyên Mua/Bán/Nắm giữ kèm theo điểm cắt lỗ/chốt lời dự kiến.
+        """
+        
+        response = await model.generate_content_async(prompt)
+        nhan_dinh_ai = response.text
+        
+        # Đóng gói tin nhắn
+        msg = (f"📊 **BÁO CÁO PHÂN TÍCH MÃ: {ma_cp}** 📊\n"
+               f"💰 Giá: **{gia_hien_tai}** | 📦 Vol: **{khoi_luong:,.0f}**\n"
+               f"📉 Đáy 1 tháng: {gia_thap_nhat} | 📈 Đỉnh 1 tháng: {gia_cao_nhat}\n\n"
+               f"🧠 **AI Phân Tích Chuyên Sâu:**\n"
+               f"{nhan_dinh_ai}")
+               
+        # Chia nhỏ tin nhắn nếu quá dài (Luật của Discord)
+        if len(msg) > 1900:
+            chunks = [msg[i:i+1900] for i in range(0, len(msg), 1900)]
+            for chunk in chunks:
+                await ctx.send(chunk)
+        else:
+            await ctx.send(msg)
+            
+    except Exception as e:
+        await ctx.send(f"❌ Có lỗi khi phân tích mã {ma_cp}: {e}")
+
+# ==========================================
+# TÍNH NĂNG CŨ: TỰ ĐỘNG SOÁT BẢNG ĐIỆN 5 PHÚT/LẦN
+# ==========================================
 @tasks.loop(minutes=5)
 async def quet_bang_dien():
-    # Lấy đúng giờ Việt Nam
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     now = datetime.datetime.now(vn_tz)
+    if now.weekday() >= 5: return
     
-    # Nghỉ Thứ 7, Chủ Nhật
-    if now.weekday() >= 5: 
-        return
-        
-    # Lọc giờ giao dịch (9h-11h30 và 13h-14h45)
     thoi_gian_hien_tai = now.hour * 100 + now.minute
     trong_gio_sang = 900 <= thoi_gian_hien_tai <= 1130
     trong_gio_chieu = 1300 <= thoi_gian_hien_tai <= 1445
     
-    if not (trong_gio_sang or trong_gio_chieu):
-        return
-
-    if CHANNEL_ID == 0:
-        return
+    if not (trong_gio_sang or trong_gio_chieu): return
+    if CHANNEL_ID == 0: return
         
-    channel = client.get_channel(CHANNEL_ID)
+    channel = bot.get_channel(CHANNEL_ID)
     
     for ma in danh_sach_ma:
         try:
-            # Lấy dữ liệu 30 ngày gần nhất để xem xu hướng
             stock = Vnstock().stock(symbol=ma, source='TCBS')
-            df = stock.quote.history(start=(now - datetime.timedelta(days=30)).strftime('%Y-%m-%d'), 
-                                     end=now.strftime('%Y-%m-%d'))
+            df = stock.quote.history(start=(now - datetime.timedelta(days=30)).strftime('%Y-%m-%d'), end=now.strftime('%Y-%m-%d'))
             
             if not df.empty:
                 gia_hien_tai = df['close'].iloc[-1]
                 khoi_luong = df['volume'].iloc[-1]
                 
-                # Logic đột biến (sửa con số 2 triệu này tùy vào mã lớn hay nhỏ)
                 if khoi_luong > 2000000: 
-                    # Prompt mớm cho Gemini AI
+                    # Prompt tự động cũng được yêu cầu chi tiết hơn
                     prompt = f"""
-                    Bạn là chuyên gia phân tích chứng khoán Việt Nam.
-                    Nhận định cực kỳ ngắn gọn (dưới 80 chữ) về cổ phiếu {ma}:
-                    - Giá hiện tại: {gia_hien_tai} VND
-                    - Khối lượng: {khoi_luong} cổ phiếu (đang đột biến mạnh trong phiên).
-                    Dòng tiền này có ý nghĩa gì? Có nên mua ngay không? Trả lời súc tích.
+                    Cổ phiếu {ma} đang có khối lượng giao dịch đột biến ({khoi_luong:,.0f} cổ phiếu), giá hiện tại là {gia_hien_tai}.
+                    Hãy phân tích thật chi tiết: Tại sao dòng tiền lại đột biến lúc này? Rủi ro và cơ hội là gì? Lời khuyên hành động tức thời?
                     """
-                    
                     response = await model.generate_content_async(prompt)
-                    nhan_dinh_ai = response.text
                     
-                    # Cấu trúc tin nhắn gửi lên Discord
-                    msg = (f"🚨 **TÍN HIỆU ĐỘT BIẾN: {ma}** 🚨\n"
-                           f"⏱ Thời gian: {now.strftime('%H:%M %d/%m/%Y')}\n"
+                    msg = (f"🚨 **CẢNH BÁO VOL ĐỘT BIẾN: {ma}** 🚨\n"
                            f"💰 Giá: {gia_hien_tai} | 📊 Vol: {khoi_luong:,.0f}\n\n"
-                           f"🧠 **AI Gemini Nhận định:**\n"
-                           f"> {nhan_dinh_ai}\n"
-                           f"----------------------------------")
+                           f"🧠 **Nhận định chi tiết:**\n{response.text}")
                            
                     if channel:
-                        await channel.send(msg)
-                    
+                        if len(msg) > 1900:
+                            await channel.send(msg[:1900] + "...\n*(Nội dung quá dài đã được cắt bớt)*")
+                        else:
+                            await channel.send(msg)
         except Exception as e:
             print(f"Lỗi ở mã {ma}: {e}")
 
-@client.event
+@bot.event
 async def on_ready():
-    print(f'✅ Bot {client.user} đã online!')
+    print(f'✅ Bot {bot.user} đã online và sẵn sàng nhận lệnh !soi')
     quet_bang_dien.start() 
 
 if __name__ == "__main__":
-    # 1. Bật web server giả lên trước
     keep_alive()
-    # 2. Chạy Bot Discord
     if TOKEN:
-        client.run(TOKEN)
+        bot.run(TOKEN)
     else:
         print("❌ Chưa cấu hình DISCORD_TOKEN")
