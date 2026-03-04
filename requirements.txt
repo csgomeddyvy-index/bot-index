@@ -1,0 +1,6 @@
+discord.py
+vnstock3
+pandas
+google-generativeai
+pytz
+flask
