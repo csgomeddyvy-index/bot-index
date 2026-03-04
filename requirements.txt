@@ -1,4 +1,0 @@
-discord.py
-vnstock3
-pandas
-flask
