@@ -7,12 +7,11 @@ import os
 import io
 import asyncio
 import requests
-import time
 import google.generativeai as genai
 import mplfinance as mpf
 from keep_alive import keep_alive 
 
-# --- LẤY BIẾN MÔI TRƯỜNG ---
+# --- 1. LẤY BIẾN MÔI TRƯỜNG ---
 TOKEN = os.environ.get("DISCORD_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", 0))
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -28,13 +27,16 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 danh_sach_ma = ['FPT', 'HPG', 'SSI', 'MWG', 'VND', 'VHM']
 
 # ==========================================
-# HÀM BÍ MẬT: GỌI TRỰC TIẾP API TCBS (KHÔNG QUA VNSTOCK)
+# HÀM MỚI: GỌI TRỰC TIẾP API VNDIRECT (BAO TRÂU, KHÔNG CHẶN)
 # ==========================================
 def get_stock_data(ticker, days=30):
-    """Hàm này lách hoàn toàn Rate Limit, lấy dữ liệu siêu tốc"""
-    end_time = int(time.time())
-    start_time = end_time - (days * 24 * 60 * 60)
-    url = f"https://apipubaws.tcbs.com.vn/stock-insight/v1/stock/bars-long-term?ticker={ticker}&type=stock&resolution=D&from={start_time}&to={end_time}"
+    vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+    now = datetime.datetime.now(vn_tz)
+    end_date = now.strftime('%Y-%m-%d')
+    start_date = (now - datetime.timedelta(days=days)).strftime('%Y-%m-%d')
+    
+    # API công khai của VNDirect lấy lịch sử giá
+    url = f"https://finfo-api.vndirect.com.vn/v4/stock_prices?sort=date&q=code:{ticker}~date:gte:{start_date}~date:lte:{end_date}&size=100"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     
     response = requests.get(url, headers=headers)
@@ -42,15 +44,22 @@ def get_stock_data(ticker, days=30):
         data = response.json().get('data', [])
         if not data:
             return pd.DataFrame()
-        # Biến đổi dữ liệu thô thành bảng Pandas chuẩn mực
+            
         df = pd.DataFrame(data)
-        df['time'] = pd.to_datetime(df['tradingDate']).dt.tz_localize(None)
+        # Sắp xếp và đổi tên cột chuẩn cho mplfinance
+        df['time'] = pd.to_datetime(df['date'])
         df.set_index('time', inplace=True)
-        df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+        # nmVolume là khối lượng khớp lệnh
+        df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'nmVolume': 'Volume'}, inplace=True)
+        
+        # Ép kiểu dữ liệu về dạng số để vẽ biểu đồ không bị lỗi
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
         df.sort_index(inplace=True)
-        return df
+        return df[['Open', 'High', 'Low', 'Close', 'Volume']]
     else:
-        raise Exception(f"Bị TCBS chặn! Mã lỗi: {response.status_code}")
+        raise Exception(f"Lỗi truy cập VNDirect! Mã lỗi: {response.status_code}")
 
 # ==========================================
 # LỆNH !soi: CÓ VẼ BIỂU ĐỒ NẾN + AI
@@ -58,10 +67,10 @@ def get_stock_data(ticker, days=30):
 @bot.command(name='soi')
 async def soi_cophieu(ctx, ma_cp: str):
     ma_cp = ma_cp.upper()
-    message = await ctx.send(f"⏳ Đang kéo dữ liệu trực tiếp và vẽ biểu đồ mã **{ma_cp}**...")
+    message = await ctx.send(f"⏳ Đang kéo dữ liệu từ VNDirect và phân tích mã **{ma_cp}**...")
     
     try:
-        # Gọi hàm API tự viết thay vì dùng vnstock
+        # Gọi API mới
         try:
             df = get_stock_data(ma_cp, days=30)
         except Exception as api_err:
@@ -89,7 +98,7 @@ async def soi_cophieu(ctx, ma_cp: str):
         buf.seek(0)
         chart_file = discord.File(fp=buf, filename=f"{ma_cp}_chart.png")
 
-        # Hỏi AI
+        # Hỏi AI Gemini
         prompt = f"""
         Chuyên gia chứng khoán phân tích mã {ma_cp}:
         - Giá: {gia_hien_tai}
@@ -128,8 +137,7 @@ async def quet_bang_dien():
     
     for ma in danh_sach_ma:
         try:
-            # Lấy dữ liệu trực tiếp
-            df = get_stock_data(ma, days=5) # Quét tự động chỉ cần 5 ngày cho nhẹ
+            df = get_stock_data(ma, days=5) 
             
             if not df.empty:
                 gia_hien_tai = df['Close'].iloc[-1]
@@ -147,11 +155,11 @@ async def quet_bang_dien():
         except Exception as e:
             print(f"Lỗi ở mã {ma}: {e}")
         finally:
-            await asyncio.sleep(2) # Vẫn giữ nhịp thở để tránh spam server TCBS
+            await asyncio.sleep(2) 
 
 @bot.event
 async def on_ready():
-    print(f'✅ Bot {bot.user} đã online vững vàng! (Sử dụng API Trực tiếp)')
+    print(f'✅ Bot {bot.user} đã online! (Sử dụng API VNDirect)')
     quet_bang_dien.start() 
 
 if __name__ == "__main__":
