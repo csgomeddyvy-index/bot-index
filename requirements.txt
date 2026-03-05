@@ -1,8 +1,9 @@
 discord.py
 pandas
-google-generativeai
 pytz
 flask
-ipython
+feedparser
+beautifulsoup4
 mplfinance
 requests
+python-dotenv
