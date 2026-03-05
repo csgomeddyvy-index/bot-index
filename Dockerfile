@@ -1,18 +1,23 @@
-# Dùng bản Python 3.10 mượt và nhẹ
+# Dùng môi trường Python 3.10 bản slim (nhẹ, tiết kiệm RAM)
 FROM python:3.10-slim
 
-# Đặt thư mục làm việc
+# Đặt thư mục làm việc mặc định bên trong container
 WORKDIR /app
 
-# Copy và cài đặt các thư viện cần thiết
+# Cài đặt các thư viện hệ thống cần thiết để vẽ biểu đồ
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy file requirements.txt vào trước để cài đặt thư viện
 COPY requirements.txt .
+
+# Cài đặt thư viện Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy toàn bộ code vào
+# Copy toàn bộ mã nguồn của bạn vào container
 COPY . .
 
-# Mở port 8080 cho Flask server chạy
-EXPOSE 8080
-
-# Chạy file main
+# Lệnh khởi động bot
 CMD ["python", "main.py"]
